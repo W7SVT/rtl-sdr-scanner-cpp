@@ -1,8 +1,10 @@
 #pragma once
 
 #include <algorithms/decimator.h>
+#include <algorithms/signal_mediator.h>
 #include <algorithms/transmission_detector.h>
 #include <network/data_controller.h>
+#include <performance_logger.h>
 #include <radio/recorder_worker.h>
 #include <radio/samples_processor.h>
 #include <utils.h>
@@ -22,24 +24,21 @@ class Recorder {
   ~Recorder();
 
   void clear();
-  void appendSamples(const std::chrono::milliseconds& time, const FrequencyRange& frequencyRange, std::vector<uint8_t>&& samples);
   bool isTransmission(const std::chrono::milliseconds& time, const FrequencyRange& frequencyRange, std::vector<uint8_t>&& samples);
   bool isTransmissionInProgress() const;
-
- private:
   void processSamples(const std::chrono::milliseconds& time, const FrequencyRange& frequencyRange, std::vector<uint8_t>&& samples);
 
+ private:
+  void processSignals(const std::chrono::milliseconds& time, const FrequencyRange& frequencyRange, const std::vector<Signal>& signals);
   const Config& m_config;
   const int32_t m_offset;
   DataController& m_dataController;
   TransmissionDetector m_transmissionDetector;
   SamplesProcessor m_samplesProcessor;
+  PerformanceLogger m_performanceLogger;
   std::vector<std::complex<float>> m_rawBuffer;
   std::chrono::milliseconds m_lastDataTime;
   std::chrono::milliseconds m_lastActiveDataTime;
-
-  std::atomic_bool m_isWorking;
-  std::atomic_bool m_isReady;
 
   struct RecorderInputSamples {
     std::chrono::milliseconds time;
@@ -54,10 +53,6 @@ class Recorder {
     std::unique_ptr<RecorderWorker> worker;
   };
 
-  mutable std::mutex m_processingMutex;
-  std::mutex m_dataMutex;
-  std::condition_variable m_cv;
-  std::deque<RecorderInputSamples> m_samples;
   std::map<FrequencyRange, std::unique_ptr<RecorderWorkerStruct>> m_workers;
-  std::thread m_thread;
+  std::map<FrequencyRange, std::unique_ptr<SignalMediator>> m_signalMediators;
 };

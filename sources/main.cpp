@@ -1,3 +1,4 @@
+#include <algorithms/fftw_initializer.h>
 #include <algorithms/spectrogram.h>
 #include <config.h>
 #include <fftw3.h>
@@ -8,6 +9,7 @@
 #include <radio/rtl_sdr_device.h>
 #include <radio/sdr_scanner.h>
 #include <signal.h>
+#include <version.h>
 
 volatile bool isRunning{true};
 
@@ -16,66 +18,30 @@ void handler(int) {
   isRunning = false;
 }
 
-struct ScannerStruct {
-  std::unique_ptr<SdrDevice> device;
-  std::unique_ptr<DataController> dataController;
-  std::unique_ptr<SdrScanner> scanner;
-};
-
 template <typename T>
-ScannerStruct createScanner(const Config& config, Mqtt& mqtt, const std::string& serial, const std::vector<UserDefinedFrequencyRange>& ranges) {
-  auto device = std::make_unique<T>(config, serial);
-  auto dataController = std::make_unique<DataController>(config, mqtt, device->name());
-  auto scanner = std::make_unique<SdrScanner>(config, ranges, *device, *dataController);
-  ScannerStruct st{std::move(device), std::move(dataController), std::move(scanner)};
-  return st;
-}
-
-template <typename T>
-std::vector<ScannerStruct> createScanners(const Config& config, Mqtt& mqtt) {
-  std::vector<ScannerStruct> scanners;
-
+void createScanners(const Config& config, Mqtt& mqtt, std::vector<std::unique_ptr<SdrScanner>>& scanners) {
   for (const auto& id : T::listDevices()) {
     for (const auto& range : config.userDefinedFrequencyRanges()) {
       if (range.serial == id) {
-        scanners.push_back(createScanner<T>(config, mqtt, id, range.ranges));
+        scanners.push_back(std::make_unique<SdrScanner>(config, range.ranges, std::make_unique<T>(config, id), mqtt));
         break;
       }
     }
     for (const auto& range : config.userDefinedFrequencyRanges()) {
       if (range.serial == "auto") {
-        scanners.push_back(createScanner<T>(config, mqtt, id, range.ranges));
+        scanners.push_back(std::make_unique<SdrScanner>(config, range.ranges, std::make_unique<T>(config, id), mqtt));
         break;
       }
     }
   }
-  return scanners;
 }
 
-std::vector<ScannerStruct> createScanners(const Config& config, Mqtt& mqtt) {
-  std::vector<ScannerStruct> scanners;
-  for (auto& scanner : createScanners<RtlSdrDevice>(config, mqtt)) {
-    scanners.push_back(std::move(scanner));
-  }
-  for (auto& scanner : createScanners<HackrfSdrDevice>(config, mqtt)) {
-    scanners.push_back(std::move(scanner));
-  }
+std::vector<std::unique_ptr<SdrScanner>> createScanners(const Config& config, Mqtt& mqtt) {
+  std::vector<std::unique_ptr<SdrScanner>> scanners;
+  createScanners<HackrfSdrDevice>(config, mqtt, scanners);
+  createScanners<RtlSdrDevice>(config, mqtt, scanners);
   return scanners;
 }
-
-class FftwInitializer {
- public:
-  FftwInitializer(uint8_t cores) {
-    fftw_init_threads();
-    fftwf_init_threads();
-    fftw_plan_with_nthreads(cores);
-    fftwf_plan_with_nthreads(cores);
-  }
-  ~FftwInitializer() {
-    fftw_cleanup_threads();
-    fftwf_cleanup_threads();
-  }
-};
 
 int main(int argc, char* argv[]) {
   std::unique_ptr<Config> config;
@@ -85,15 +51,18 @@ int main(int argc, char* argv[]) {
     config = std::make_unique<Config>("", "");
   }
   Logger::configure(config->logLevelConsole(), config->logLevelFile(), config->logDir());
+  Logger::info("main", "git commit: {}", GIT_COMMIT);
+  Logger::info("main", "git tag: {}", GIT_TAG);
 
-  Logger::info("main", "start thread id: {}", getThreadId());
-  Logger::info("main", "start app auto_sdr");
 #ifndef NDEBUG
   Logger::info("main", "build type: debug");
 #else
   Logger::info("main", "build type: release");
 #endif
 
+  config->log();
+  Logger::info("main", "start app auto_sdr");
+  Logger::info("main", "start thread id: {}", getThreadId());
   try {
     signal(SIGINT, handler);
     signal(SIGTERM, handler);
@@ -103,7 +72,15 @@ int main(int argc, char* argv[]) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
       }
       reloadConfig = false;
-      auto f = [&config, &reloadConfig, argc, argv](const std::string& topic, const std::string& message) {
+
+      // FftwInitializer fftwInitializer(config->cores());
+      Mqtt mqtt(*config);
+      for (const auto& ignoredFrequencyRange : config->ignoredFrequencyRanges()) {
+        Logger::info("main", "ignored frequency, {}", ignoredFrequencyRange.toString());
+      }
+      auto scanners = createScanners(*config, mqtt);
+
+      auto f = [&config, &reloadConfig, &scanners, argc, argv](const std::string& topic, const std::string& message) {
         if (topic == "sdr/config") {
           Logger::info("main", "reload config: {}", message);
           if (argc >= 2) {
@@ -111,21 +88,34 @@ int main(int argc, char* argv[]) {
           } else {
             config = std::make_unique<Config>("", message);
           }
+          config->log();
           reloadConfig = true;
+        } else if (topic == "sdr/manual_recording") {
+          try {
+            const auto data = nlohmann::json::parse(message);
+            const auto serial = data["serial"].get<std::string>();
+            const auto frequency = data["frequency"].get<Frequency>();
+            const auto sampleRate = data["sample_rate"].get<Frequency>();
+            const auto seconds = std::chrono::seconds(data["seconds"].get<uint32_t>());
+            for (auto& scanner : scanners) {
+              if (scanner->deviceSerial() == serial) {
+                scanner->manualRecording({frequency - sampleRate / 2, frequency + sampleRate / 2, 0, sampleRate}, seconds);
+              }
+            }
+          } catch (const nlohmann::json::parse_error& e) {
+            Logger::warn("main", "can not make manual recording: {}", e.what());
+          }
         }
       };
-
-      // FftwInitializer fftwInitializer(config->cores());
-      Mqtt mqtt(*config);
       mqtt.setMessageCallback(f);
-      auto scanners = createScanners(*config, mqtt);
+
       if (scanners.empty()) {
         Logger::warn("main", "not found sdr devices");
         break;
       } else {
         while (isRunning && !scanners.empty() && !reloadConfig) {
           std::this_thread::sleep_for(std::chrono::milliseconds(10));
-          scanners.erase(std::remove_if(scanners.begin(), scanners.end(), [](const ScannerStruct& scanner) { return !scanner.scanner->isRunning(); }), scanners.end());
+          scanners.erase(std::remove_if(scanners.begin(), scanners.end(), [](const std::unique_ptr<SdrScanner>& scanner) { return !scanner->isRunning(); }), scanners.end());
         }
         if (!reloadConfig) {
           break;

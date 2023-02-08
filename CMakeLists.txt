@@ -15,11 +15,7 @@ find_package(RTLSDR REQUIRED)
 find_package(Threads REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(GTest REQUIRED)
-
-find_library(PROCPS_LIB procps)
-if(NOT PROCPS_LIB)
-  message(FATAL_ERROR "procps library not found")
-endif()
+find_package(Boost REQUIRED)
 
 find_library(FFTW_LIB fftw3)
 if(NOT FFTW_LIB)
@@ -59,13 +55,14 @@ TARGET_LINK_LIBRARIES(auto_sdr_libs
     rtlsdr
     Threads::Threads
     fftw3_threads
+    fftw3
     fftw3f_threads
+    fftw3f
     liquid
     mosquitto
     hackrf
     stdc++fs
     nlohmann_json::nlohmann_json
-    procps
 )
 
 add_executable(auto_sdr "sources/main.cpp")

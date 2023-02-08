@@ -21,11 +21,46 @@ std::vector<std::pair<FrequencyRange, bool>> TransmissionDetector::getTransmissi
   return transmissions;
 }
 
-void TransmissionDetector::updateTransmissionLastSignalTime(const std::chrono::milliseconds& time, const std::vector<Signal>& signals) {
+void TransmissionDetector::updateTransmissionLastSignalTime(const std::chrono::milliseconds& time, std::vector<Signal>&& signals) {
+  std::sort(signals.begin(), signals.end(), [](const Signal& s1, const Signal& s2) { return s1.power > s2.power; });
+  auto isIgnored = [this](const Signal& signal) {
+    for (const auto& ignoredFrequencyRange : m_config.ignoredFrequencyRanges()) {
+      if (ignoredFrequencyRange.start <= signal.frequency && signal.frequency <= ignoredFrequencyRange.stop) {
+        return true;
+      }
+    }
+    return false;
+  };
   for (const auto& signal : signals) {
-    Logger::debug("SigMatcher", "strong {}", signal.toString());
+    if (isIgnored(signal)) {
+      Logger::debug("SigMatcher", "strong {} - ignored", signal.toString());
+      continue;
+    } else {
+      Logger::debug("SigMatcher", "strong {}", signal.toString());
+    }
     const auto frequencyRange = getTransmission(signal.frequency);
-    const auto it = m_transmissions.find(frequencyRange);
+    auto it = m_transmissions.find(frequencyRange);
+    if (it == m_transmissions.end()) {
+      auto add = [](FrequencyRange frequencyRange, int frequency) {
+        return FrequencyRange(frequencyRange.start + frequency, frequencyRange.stop + frequency, frequencyRange.sampleRate, frequencyRange.fft);
+      };
+      for (int i = 1; i <= 2; ++i) {
+        if (it != m_transmissions.end()) {
+          break;
+        } else {
+          it = m_transmissions.find(add(frequencyRange, i * m_config.frequencyGroupingSize()));
+        }
+        if (it != m_transmissions.end()) {
+          break;
+        } else {
+          it = m_transmissions.find(add(frequencyRange, -i * m_config.frequencyGroupingSize()));
+        }
+      }
+      if (it != m_transmissions.end()) {
+        Logger::debug("SigMatcher", "merge group with neighbor one");
+        break;
+      }
+    }
     if (it != m_transmissions.end()) {
       it->second.lastSignal = std::max(it->second.lastSignal, time);
     } else {

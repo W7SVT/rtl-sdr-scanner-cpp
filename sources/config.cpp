@@ -1,11 +1,13 @@
 #include "config.h"
 
+#include <logger.h>
+
 // experts only
 constexpr auto RESAMPLER_FILTER_LENGTH = 1;
 constexpr auto SPECTROGAM_FACTOR = 0.1f;
 
 std::string UserDefinedFrequencyRange::toString() const {
-  return frequencyToString(start, "start") + ", " + frequencyToString(stop, "stop") + ", " + frequencyToString(step, "step") + ", " + frequencyToString(sampleRate, "sample rate");
+  return frequencyToString(start, "start") + ", " + frequencyToString(stop, "stop") + ", " + frequencyToString(sampleRate, "sample rate") + ", fft: " + std::to_string(fft);
 }
 
 nlohmann::json readJsonFromFile(const std::string &path) {
@@ -92,9 +94,9 @@ std::vector<UserDefinedFrequencyRanges> parseFrequenciesRanges(const nlohmann::j
     for (const nlohmann::json &subValue : value["ranges"]) {
       const auto start = subValue["start"].get<Frequency>();
       const auto stop = subValue["stop"].get<Frequency>();
-      const auto step = subValue["step"].get<Frequency>();
       const auto sampleRate = subValue["sample_rate"].get<Frequency>();
-      subRanges.push_back({start, stop, step, sampleRate});
+      const auto fft = subValue.contains("fft") ? subValue["fft"].get<Frequency>() : 0;
+      subRanges.push_back({start, stop, sampleRate, fft});
     }
     ranges.push_back({deviceSerial, subRanges});
   }
@@ -114,9 +116,36 @@ std::vector<UserDefinedFrequencyRanges> parseFrequenciesRanges(const Config::Int
   }
 }
 
+IgnoredFrequencies parseIgnoredFrequencies(const nlohmann::json &json, const std::string &key) {
+  if (!json.contains(key) || json[key].empty()) {
+    throw std::runtime_error("parseFrequenciesRanges exception: empty value");
+  }
+  IgnoredFrequencies ignoredFrequencies;
+  for (const nlohmann::json &value : json[key]) {
+    const auto frequency = value["frequency"].get<Frequency>();
+    const auto bandwidth = value["bandwidth"].get<Frequency>();
+    ignoredFrequencies.push_back({frequency - bandwidth / 2, frequency + bandwidth / 2, 0, 0});
+  }
+  return ignoredFrequencies;
+}
+
+IgnoredFrequencies parseIgnoredFrequencies(const Config::InternalJson &json, const std::string &key) {
+  try {
+    return parseIgnoredFrequencies(json.masterJson, key);
+  } catch (const std::exception &) {
+    try {
+      return parseIgnoredFrequencies(json.slaveJson, key);
+    } catch (const std::exception &) {
+      fprintf(stderr, "warning, can not read from config (use default value): %s\n", key.c_str());
+      return {};
+    }
+  }
+}
+
 Config::Config(const std::string &path, const std::string &config)
     : m_json(getInternalJson(path, config)),
       m_userDefinedFrequencyRanges(parseFrequenciesRanges(m_json, "scanner_frequencies_ranges")),
+      m_ignoredFrequencies(parseIgnoredFrequencies(m_json, "ignored_frequencies")),
       m_maxRecordingNoiseTime(std::chrono::milliseconds(readKey(m_json, {"recording", "max_noise_time_ms"}, 2000))),
       m_minRecordingTime(std::chrono::milliseconds(readKey(m_json, {"recording", "min_time_ms"}, 1000))),
       m_minRecordingSampleRate(readKey(m_json, {"recording", "min_sample_rate"}, 64000)),
@@ -141,7 +170,20 @@ Config::Config(const std::string &path, const std::string &config)
       m_mqttUsername(readKey(m_json, {"mqtt", "username"}, std::string(""))),
       m_mqttPassword(readKey(m_json, {"mqtt", "password"}, std::string(""))) {}
 
+void Config::log() {
+  auto removeCredentials = [](const nlohmann::json &json) {
+    auto copy(json);
+    if (copy.contains("mqtt")) {
+      copy.erase("mqtt");
+    }
+    return copy;
+  };
+  Logger::info("config", "data: {}", removeCredentials(m_json.masterJson).dump());
+  Logger::info("config", "file: {}", removeCredentials(m_json.slaveJson).dump());
+}
+
 std::vector<UserDefinedFrequencyRanges> Config::userDefinedFrequencyRanges() const { return m_userDefinedFrequencyRanges; }
+IgnoredFrequencies Config::ignoredFrequencyRanges() const { return m_ignoredFrequencies; }
 
 std::chrono::milliseconds Config::maxRecordingNoiseTime() const { return m_maxRecordingNoiseTime; }
 std::chrono::milliseconds Config::minRecordingTime() const { return m_minRecordingTime; }

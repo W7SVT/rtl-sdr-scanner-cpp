@@ -3,8 +3,14 @@
 #include <logger.h>
 #include <utils.h>
 
-SdrScanner::SdrScanner(const Config& config, const std::vector<UserDefinedFrequencyRange>& ranges, SdrDevice& device, DataController& dataController)
-    : m_config(config), m_device(device), m_recorder(config, m_device.offset(), dataController), m_isRunning(true) {
+SdrScanner::SdrScanner(const Config& config, const std::vector<UserDefinedFrequencyRange>& ranges, std::unique_ptr<SdrDevice>&& device, Mqtt& mqtt)
+    : m_config(config),
+      m_device(std::move(device)),
+      m_dataController(config, mqtt, m_device->name()),
+      m_recorder(config, m_device->offset(), m_dataController),
+      m_performanceLogger("Scanner"),
+      m_isRunning(true),
+      m_isManualRecordingWaiting(false) {
   Logger::info("Scanner", "original frequency ranges: {}", ranges.size());
   for (const auto& range : ranges) {
     Logger::info("Scanner", "frequency range {}", range.toString());
@@ -30,14 +36,15 @@ SdrScanner::SdrScanner(const Config& config, const std::vector<UserDefinedFreque
     Logger::info("Scanner", "start thread id: {}", getThreadId());
     setThreadParams("scanner", PRIORITY::HIGH);
     try {
-      if (splittedFrequencyRanges.size() == 1) {
-        startStream(splittedFrequencyRanges.front(), true);
-      } else {
-        while (m_isRunning) {
+      while (m_isRunning) {
+        if (splittedFrequencyRanges.size() == 1) {
+          startStream(splittedFrequencyRanges.front(), true);
+        } else {
           for (const auto& frequencyRange : splittedFrequencyRanges) {
             readSamples(frequencyRange);
           }
         }
+        checkManualRecording();
       }
     } catch (const std::exception& exception) {
       Logger::error("Scanner", "exception: {}", exception.what());
@@ -54,23 +61,55 @@ SdrScanner::~SdrScanner() {
 
 bool SdrScanner::isRunning() const { return m_isRunning; }
 
+void SdrScanner::manualRecording(const FrequencyRange& frequencyRange, std::chrono::milliseconds time) {
+  m_manualRecording = std::make_unique<ManualRecording>(frequencyRange, time);
+  m_isManualRecordingWaiting = true;
+}
+
+std::string SdrScanner::deviceSerial() { return m_device->serial(); }
+
 void SdrScanner::startStream(const FrequencyRange& frequencyRange, bool runForever) {
-  auto f = [this, frequencyRange, runForever](std::vector<uint8_t>&& data) {
-    if (isMemoryLimitReached(m_config.memoryLimit())) {
-      Logger::warn("Scanner", "reached memory limit, skipping samples");
-    } else {
-      m_recorder.appendSamples(time(), frequencyRange, std::move(data));
-    }
-    return m_isRunning && (runForever || m_recorder.isTransmissionInProgress());
-  };
   m_recorder.clear();
-  m_device.startStream(frequencyRange, std::move(f));
+  m_device->startStream(frequencyRange);
+  while (m_isRunning && !m_isManualRecordingWaiting && (runForever || m_recorder.isTransmissionInProgress())) {
+    m_device->waitForData();
+    while (m_device->isDataAvailable()) {
+      m_performanceLogger.newSample();
+      auto&& samples = m_device->getStreamData();
+      m_recorder.processSamples(samples.time, frequencyRange, std::move(samples.data));
+    }
+  }
+  m_device->stopStream();
   m_recorder.clear();
 }
 
 void SdrScanner::readSamples(const FrequencyRange& frequencyRange) {
-  auto data = m_device.readData(frequencyRange);
-  if (!data.empty() && m_recorder.isTransmission(time(), frequencyRange, std::move(data))) {
+  auto&& samples = m_device->readData(frequencyRange);
+  m_performanceLogger.newSample();
+  if (!samples.data.empty() && m_recorder.isTransmission(time(), frequencyRange, std::move(samples.data))) {
     startStream(frequencyRange, false);
+  }
+}
+
+void SdrScanner::checkManualRecording() {
+  if (m_isManualRecordingWaiting && m_manualRecording) {
+    const auto startTime = time();
+    const auto frequencyRange = m_manualRecording->frequencyRange;
+    const auto totalTime = m_manualRecording->time;
+
+    Logger::info("Scanner", "start manual recoridng: {}, time: {} seconds", frequencyRange.toString(), std::chrono::duration_cast<std::chrono::seconds>(totalTime).count());
+    m_device->startStream(frequencyRange);
+    while (m_isRunning && time() - startTime <= totalTime) {
+      m_device->waitForData();
+      while (m_isRunning && m_device->isDataAvailable()) {
+        m_performanceLogger.newSample();
+        auto&& samples = m_device->getStreamData();
+        m_dataController.pushTransmission(samples.time, frequencyRange, std::move(samples.data), true);
+      }
+    }
+    Logger::info("Scanner", "finish manual recording: {}", frequencyRange.toString());
+    m_dataController.finishTransmission(frequencyRange);
+    m_device->stopStream();
+    m_isManualRecordingWaiting = false;
   }
 }

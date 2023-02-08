@@ -3,13 +3,13 @@
 #include <liquid/liquid.h>
 #include <logger.h>
 #include <math.h>
-#include <proc/readproc.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/time.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <fstream>
 #include <numeric>
 #include <stdexcept>
 #include <thread>
@@ -25,29 +25,30 @@ bool isMemoryLimitReached(uint64_t limit) {
   if (limit == 0) {
     return false;
   } else {
-    struct proc_t usage;
-    look_up_our_self(&usage);
-    constexpr auto factor = 1024 * 1024;
-    const uint64_t total = usage.vsize / factor;
-    const uint64_t rss = usage.rss * sysconf(_SC_PAGE_SIZE) / factor;
-    Logger::debug("memory", "total: {} MB, rss: {} MB", total, rss);
-    return limit <= rss;
+    std::ifstream statm("/proc/self/statm", std::ios_base::in);
+    uint64_t vmSize, vmRss;
+    statm >> vmSize >> vmRss;
+    statm.close();
+    vmSize = vmSize * sysconf(_SC_PAGE_SIZE) / 1024 / 1024;
+    vmRss = vmRss * sysconf(_SC_PAGE_SIZE) / 1024 / 1024;
+    Logger::info("memory", "total: {} MB, rss: {} MB", vmSize, vmRss);
+    return limit <= vmRss;
   }
 }
 
-uint32_t getSamplesCount(const Frequency &sampleRate, const std::chrono::milliseconds &time) {
+uint32_t getSamplesCount(const Frequency &sampleRate, const std::chrono::milliseconds &time, const uint32_t minSamplesCount) {
   if (time.count() >= 1000) {
     if (time.count() * sampleRate % 1000 != 0) {
       throw std::runtime_error("selected time not fit to sample rate");
     }
-    return 2 * time.count() * sampleRate / 1000;
+    return std::max(static_cast<uint32_t>(2 * time.count() * sampleRate / 1000), minSamplesCount);
   } else {
     const auto samplesCount = std::lround(sampleRate / (1000.0f / time.count()) * 2);
     if (samplesCount % 512 != 0) {
       Logger::warn("utils", "samples count {} not fit 512", samplesCount);
       throw std::runtime_error("selected time not fit to sample rate");
     }
-    return samplesCount;
+    return std::max(static_cast<uint32_t>(samplesCount), minSamplesCount);
   }
 }
 
@@ -100,16 +101,19 @@ std::vector<FrequencyRange> fitFrequencyRange(const UserDefinedFrequencyRange &u
     }
     std::vector<FrequencyRange> results;
     for (Frequency i = userRange.start; i < userRange.stop; i += subSampleRate) {
-      for (const auto &range : fitFrequencyRange({i, i + subSampleRate, userRange.step, userRange.sampleRate})) {
+      for (const auto &range : fitFrequencyRange({i, i + subSampleRate, userRange.sampleRate, userRange.fft})) {
         results.push_back(range);
       }
     }
     return results;
   }
-  const auto fftSize = userRange.sampleRate / userRange.step;
-  if (fftSize != pow(2.0f, ceil(log2(fftSize)))) {
-    Logger::warn("utils", "range {}, step and sample rate not fit, calculated fft size: {}", userRange.toString(), fftSize);
-    throw std::runtime_error("");
+  return {{userRange.start, userRange.stop, userRange.sampleRate, userRange.fft}};
+}
+
+uint32_t countFft(const Frequency sampleRate) {
+  uint32_t newFft = 1;
+  while (2000 <= sampleRate / newFft) {
+    newFft = newFft << 1;
   }
-  return {{userRange.start, userRange.stop, userRange.step, userRange.sampleRate}};
+  return newFft;
 }

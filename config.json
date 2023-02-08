@@ -6,12 +6,12 @@
         {
           "start": 144000000,
           "stop": 146000000,
-          "step": 1000,
           "sample_rate": 2048000
         }
       ]
     }
   ],
+  "ignored_frequencies": [],
   "devices": {
     "rtl_sdr": {
       "ppm_error": 0,

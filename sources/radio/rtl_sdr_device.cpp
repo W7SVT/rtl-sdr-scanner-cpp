@@ -5,63 +5,61 @@
 #include <utils.h>
 
 #include <chrono>
-#include <thread>
+
+constexpr uint32_t RTLSDR_MIN_SAMPLES_READ_COUNT = 262144;
 
 int getDeviceIndex(const std::string& serial) { return rtlsdr_get_index_by_serial(serial.c_str()); }
 
-RtlSdrDevice::RtlSdrDevice(const Config& config, const std::string& serial) : m_config(config), m_serial(serial), m_deviceIndex(getDeviceIndex(serial)) { open(); }
+RtlSdrDevice::RtlSdrDevice(const Config& config, const std::string& serial) : SdrDevice("RtlSdr"), m_config(config), m_serial(serial), m_deviceIndex(getDeviceIndex(serial)) { open(); }
 
 RtlSdrDevice::~RtlSdrDevice() { close(); }
 
-void RtlSdrDevice::startStream(const FrequencyRange& frequencyRange, Callback&& callback) {
-  using StreamCallbackData = std::tuple<RtlSdrDevice*, Callback*>;
-
+void RtlSdrDevice::startStream(const FrequencyRange& frequencyRange) {
   setupDevice(frequencyRange);
-  auto f = [](uint8_t* buf, uint32_t len, void* ctx) {
-    Logger::debug("RtlSdr", "read bytes: {}", len);
-    StreamCallbackData* data = reinterpret_cast<StreamCallbackData*>(ctx);
-    RtlSdrDevice* device = std::get<0>(*data);
-    Callback* callback = std::get<1>(*data);
-    if (!(*callback)(std::vector<uint8_t>(buf, buf + len))) {
-      Logger::info("RtlSdr", "cancel stream");
-      rtlsdr_cancel_async(device->m_device);
-    }
-  };
-  Logger::info("RtlSdr", "start stream");
-  StreamCallbackData data(this, &callback);
-  rtlsdr_read_async(m_device, f, &data, 0, 0);
-  Logger::info("RtlSdr", "stop stream");
+  m_thread = std::make_unique<std::thread>([this]() {
+    auto f = [](uint8_t* buf, uint32_t size, void* ctx) {
+      Logger::debug("RtlSdr", "read bytes: {}", size);
+      RtlSdrDevice* device = reinterpret_cast<RtlSdrDevice*>(ctx);
+      device->m_dataBuffer.push(buf, size);
+      device->m_timeBuffer.push_back(time());
+      device->m_cv.notify_one();
+      device->m_performanceLogger.newSample();
+    };
+    Logger::info("RtlSdr", "start stream");
+    setThreadParams("rtlsdr_reader", PRIORITY::MEDIUM);
+    rtlsdr_read_async(m_device, f, this, 0, 0);
+    Logger::info("RtlSdr", "stop stream");
+  });
 }
 
-std::vector<uint8_t> RtlSdrDevice::readData(const FrequencyRange& frequencyRange) {
+void RtlSdrDevice::stopStream() {
+  Logger::info("RtlSdr", "cancel stream");
+  rtlsdr_cancel_async(m_device);
+  m_thread->join();
+}
+
+SdrDevice::Samples RtlSdrDevice::readData(const FrequencyRange& frequencyRange) {
   const auto sampleRate = frequencyRange.sampleRate;
-  const auto samples = getSamplesCount(sampleRate, m_config.frequencyRangeScanningTime());
+  const auto samples = getSamplesCount(sampleRate, m_config.frequencyRangeScanningTime(), RTLSDR_MIN_SAMPLES_READ_COUNT);
 
   setupDevice(frequencyRange);
   int read{0};
-  if (m_rawBuffer.size() < samples) {
-    m_rawBuffer.resize(samples);
-  }
-  const auto status = rtlsdr_read_sync(m_device, m_rawBuffer.data(), samples, &read);
+  std::vector<uint8_t> buffer(samples);
+  const auto status = rtlsdr_read_sync(m_device, buffer.data(), samples, &read);
   if (status != 0) {
     throw std::runtime_error("read samples error");
   } else if (read != static_cast<int>(samples)) {
     throw std::runtime_error("read samples error, dropped samples");
   } else {
     Logger::debug("RtlSdr", "read bytes: {}", samples);
-    if (isSamplesOk(m_rawBuffer.data(), samples)) {
-      return {m_rawBuffer.begin(), m_rawBuffer.begin() + samples};
-    } else {
-      Logger::warn("RtlSdr", "samples not ok, {}", frequencyRange.toString());
-      close();
-      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-      open();
-      return {};
-    }
+    m_performanceLogger.newSample();
+    return {time(), buffer};
   }
 }
 
 std::string RtlSdrDevice::name() const { return {"rtlsdr_" + m_serial}; }
+
+std::string RtlSdrDevice::serial() const { return m_serial; }
 
 int32_t RtlSdrDevice::offset() const { return m_config.rtlSdrOffset(); }
 
@@ -114,21 +112,27 @@ void RtlSdrDevice::close() {
   rtlsdr_close(m_device);
 }
 
-bool RtlSdrDevice::isSamplesOk(uint8_t*, uint32_t) {
-  return true;  // TODO fix or check it why it not works correctly
-  // const uint64_t sum = std::accumulate(buf, buf + len, 0ull);
-  // const float mean = std::llround(static_cast<float>(sum) / len);
-  // const float sum2 = std::accumulate(buf, buf + len, 0.0f, [mean](const float& sum, const uint8_t& value) { return sum + powf(mean - value, 2); });
-  // const float std = std::sqrt(sum2 / len);
-  // return 5.0 <= std;
+void RtlSdrDevice::waitForDeviceAvailable() {
+  // hack because rtl-sdr device sometimes failed
+  for (int i = 0; i < 10; ++i) {
+    Logger::debug("RtlSdr", "check device availability: {}", i);
+    if (rtlsdr_set_tuner_bandwidth(m_device, m_lastBandwidth) == 0) {
+      break;
+    }
+  }
 }
 
 void RtlSdrDevice::setupDevice(const FrequencyRange& frequencyRange) {
   const auto centerFrequency = frequencyRange.center();
-  const auto bandwidth = frequencyRange.bandwidth;
+  const auto bandwidth = frequencyRange.sampleRate;
   const auto sampleRate = frequencyRange.sampleRate;
+  const auto samples = getSamplesCount(sampleRate, m_config.frequencyRangeScanningTime(), RTLSDR_MIN_SAMPLES_READ_COUNT);
+  m_samplesSize = samples;
   bool resetBuffer = false;
+  m_dataBuffer.clear();
+  m_timeBuffer.clear();
 
+  waitForDeviceAvailable();
   if (m_lastBandwidth != bandwidth) {
     Logger::debug("RtlSdr", "set {}", frequencyToString(bandwidth, "bandwidth"));
     if (rtlsdr_set_tuner_bandwidth(m_device, bandwidth) != 0) {

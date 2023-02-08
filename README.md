@@ -13,7 +13,7 @@ It also provides easy but very powerful **web panel** to explore recordings and 
 
 # Sample data collected
 
-[YouTube video](http://www.youtube.com/watch?v=TSDbcb7wSjs)
+[YouTube video](http://www.youtube.com/watch?v=TSDbcb7wSjs) (old version)
 
 | Spectrogram | Transmission |
 | - | - |
@@ -43,18 +43,57 @@ wget https://github.com/W7SVT/rtl-sdr-scanner-cpp/raw/master/docker-compose.yml
 docker-compose up -d
 ```
 
-Wait a moment to collect data and open panel.
-
 To update docker images to latest version type:
 ```
 docker-compose pull
 ```
 
+Also remember to update `docker-compose.yml` and `config.json`.
+
 ## Panel
 
 Open [http://localhost:8000/sdr/spectrograms/](http://localhost:8000/sdr/spectrograms/) and wait for data to collect.
 
-Admin panel available at [http://127.0.0.1:8000/admin/](http://127.0.0.1:8000/admin/). Username: `admin`, password: `password`.
+Admin panel available at [http://localhost:8000/admin/](http://localhost:8000/admin/). Username: `admin`, password: `password`.
+
+# Important
+
+## Blacklist kernel modules
+
+If you use `rtl-sdr` remember to blacklist `rtl2832` modules. Then reboot system.
+
+```
+sudo nano /etc/modprobe.d/blacklist-rtl2832.conf
+```
+
+```
+blacklist rtl2832
+blacklist dvb_usb_rtl28xxu
+blacklist rtl2832_sdr
+blacklist rtl8xxxu
+```
+
+## Noise learner
+
+To auto-detect transmissions, sdr scanner has to learn noise level every run. It takes first `n` seconds (defined in `config.json` as `noise_learning_time_seconds` default is `30` seconds). So if any transmission will appear in this period it's may not be detected by scanner later.
+
+## Torn transmissions detector
+
+Sdr scanner has feature to avoid recording torn transmission like below.
+
+![](images/torn_transmission.png?raw=1)
+
+It takes first `n` seconds (defined in `config.json` as `torn_transmission_learning_time_seconds` default is `60` seconds) seconds.
+
+## Auto-recording
+
+So sdr scanner starts auto-recording transsmions after `noise_learning_time_seconds` + `torn_transmission_learning_time_seconds`.
+
+## Required resources
+
+Using this software with `HackRF` and `sample rate` `10 MHz` and above needs strong PC. In most casies, `Raspberry Pi` will not be enough.
+
+For example, `HackRF` with `sample rate` `20 Mhz` generates about `40 MB` of data every second, and processing it in real-time needs a strong CPU with multiple cores and some memory resources.
 
 # Config
 
@@ -74,7 +113,6 @@ To scan single frequency range:
         {
           "start": 144000000,
           "stop": 146000000,
-          "step": 1000,
           "sample_rate": 2048000
         }
       ]
@@ -112,7 +150,6 @@ To scan single frequency range:
         {
           "start": 430000000,
           "stop": 450000000,
-          "step": 2500,
           "sample_rate": 20480000
         }
       ]
@@ -136,6 +173,24 @@ To set `lna` to `16` and `gain` to `42`:
 }
 ```
 
+## Ignored frequencies
+
+To ignore annoying frequency that you are not interested use `ignored_frequencies`. For example to ignore frequency `144 Mhz` with width `20 kHz` and `145.350 Mhz` with width `50 kHz` use:
+```
+{
+  "ignored_frequencies": [
+    {
+      "frequency": 144000000,
+      "bandwidth": 20000
+    },
+    {
+      "frequency": 145350000,
+      "bandwidth": 50000
+    }
+  ]
+}
+```
+
 ## Use multipe devices
 
 To use two dongles with serials `11111111` and `22222222`:
@@ -148,7 +203,6 @@ To use two dongles with serials `11111111` and `22222222`:
         {
           "start": 144000000,
           "stop": 146000000,
-          "step": 1000,
           "sample_rate": 2048000
         }
       ]
@@ -159,7 +213,6 @@ To use two dongles with serials `11111111` and `22222222`:
         {
           "start": 440000000,
           "stop": 442000000,
-          "step": 1000,
           "sample_rate": 2048000
         }
       ]
@@ -182,13 +235,11 @@ To scan `144 Mhz - 146 Mhz` and `440 Mhz - 442 Mhz` in the same time:
         {
           "start": 144000000,
           "stop": 146000000,
-          "step": 1000,
           "sample_rate": 2048000
         },
         {
           "start": 440000000,
           "stop": 442000000,
-          "step": 1000,
           "sample_rate": 2048000
         }
       ]
@@ -197,32 +248,41 @@ To scan `144 Mhz - 146 Mhz` and `440 Mhz - 442 Mhz` in the same time:
 }
 ```
 
-## Custom sample rate, step and frequency range
+## Custom fft
 
-Please note that `sample_rate` must fit to `step`. You should meet the following equation `sample_rate / step = 2 ^ n`.
+It is possible to set custom fft on spectrogram.
+```
+{
+  "scanner_frequencies_ranges": [
+    {
+      "device_serial": "auto",
+      "ranges": [
+        {
+          "start": 144000000,
+          "stop": 146000000,
+          "sample_rate": 2048000,
+          "fft": 16384
+        }
+      ]
+    }
+  ]
+}
+```
 
-The smaller the step, the more accurate the spectrogram, but the larger the file size and the higher the CPU consumption.
+# Debugging
 
-The most popular values:
+If you have some problems with this software follow the steps to get debug log.
 
-| `sample_rate` | `step` |
-| - | - |
-| 1024000 | 250 |
-| 1024000 | 500 |
-| 1024000 | 1000 |
-| 2048000 | 250 |
-| 2048000 | 500 |
-| 2048000 | 1000 |
-| 10240000 | 625 |
-| 10240000 | 1250 |
-| 10240000 | 2500 |
-| 20480000 | 625 |
-| 20480000 | 1250 |
-| 20480000 | 2500 |
+Set `"console_log_level": "trace"` in `config.json`.
 
-Please note that `rtl-sdr` do not support `sample_rate` greather than `2500000`.
+Then run app normally by `docker compose up`. After the error run `docker compose logs > logs.txt`. Please attach `logs.txt` if you create a new issue. Do not paste logs directly to issue. Upload it to any file host service ([https://file.io/](https://file.io/), [https://pastebin.com/](https://pastebin.com/) or any you like).
 
-Please note that `sample_rate` must be greather than (`stop frequency range` - `start frequency range`).
+# Timezone
+
+If timezone detection not work correctly and it seems to use `UTC` instead your timezone please set timezone in host system. To set `Europe/Warsaw` type:
+```
+echo "Europe/Warsaw" > /etc/timezone
+```
 
 # Advanced usage
 
@@ -233,7 +293,7 @@ Please note that `sample_rate` must be greather than (`stop frequency range` - `
 Build
 
 ```
-sudo apt-get install build-essential cmake ccache libprocps-dev libfftw3-dev libspdlog-dev librtlsdr-dev libhackrf-dev libliquid-dev nlohmann-json3-dev libmosquitto-dev libgtest-dev libgmock-dev
+sudo apt-get install build-essential cmake ccache libfftw3-dev libspdlog-dev librtlsdr-dev libhackrf-dev libliquid-dev nlohmann-json3-dev libmosquitto-dev libgtest-dev libgmock-dev libboost-all-dev
 git clone https://github.com/shajen/rtl-sdr-scanner-cpp sdr-scanner
 cd sdr-scanner
 cmake -B build -DCMAKE_BUILD_TYPE=Release .

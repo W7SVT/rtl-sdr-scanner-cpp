@@ -3,6 +3,7 @@
 #include <config.h>
 #include <libhackrf/hackrf.h>
 #include <radio/sdr_device.h>
+#include <ring_buffer.h>
 
 class HackRfInitializer {
  public:
@@ -16,10 +17,16 @@ class HackrfSdrDevice : public SdrDevice {
   ~HackrfSdrDevice() override;
 
   static std::vector<std::string> listDevices();
-  void startStream(const FrequencyRange& frequencyRange, Callback&& callback) override;
+  static int callbackStream(hackrf_transfer* transfer);
+
+  void startStream(const FrequencyRange& frequencyRange) override;
+  void stopStream() override;
+
+  SdrDevice::Samples readData(const FrequencyRange& frequencyRange) override;
+
   std::string name() const override;
+  std::string serial() const override;
   int32_t offset() const override;
-  std::vector<uint8_t> readData(const FrequencyRange& frequencyRange) override;
 
  private:
   void setup(const FrequencyRange& frequencyRange);
@@ -30,4 +37,5 @@ class HackrfSdrDevice : public SdrDevice {
   hackrf_device* m_device;
   Frequency m_frequency;
   Frequency m_sampleRate;
+  bool m_threadInitialized;
 };
