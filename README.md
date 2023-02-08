@@ -32,8 +32,8 @@ Download sample configuration and docker file, then run it. Customize `config.js
 ```
 mkdir -p sdr
 cd sdr
-wget https://github.com/shajen/rtl-sdr-scanner-cpp/raw/master/config.json
-wget https://github.com/shajen/rtl-sdr-scanner-cpp/raw/master/docker-compose.yml
+wget https://github.com/W7SVT/rtl-sdr-scanner-cpp/raw/master/config.json
+wget https://github.com/W7SVT/rtl-sdr-scanner-cpp/raw/master/docker-compose.yml
 docker compose up
 ```
 
