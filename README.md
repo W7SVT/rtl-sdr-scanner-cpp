@@ -26,6 +26,12 @@ It also provides easy but very powerful **web panel** to explore recordings and 
 
 If you do not have `docker` installed, follow the instructions available at [https://docs.docker.com/desktop/](https://docs.docker.com/desktop/) to install `docker` and `docker compose`.
 
+## PreReqs
+Install Docker and Docker Compose
+```
+sudo apt install docker.io docker-compose
+sudo usermod -aG docker $USER
+```
 ## Run
 
 Download sample configuration and docker file, then run it. Customize `config.json` to your needs.
@@ -34,14 +40,14 @@ mkdir -p sdr
 cd sdr
 wget https://github.com/W7SVT/rtl-sdr-scanner-cpp/raw/master/config.json
 wget https://github.com/W7SVT/rtl-sdr-scanner-cpp/raw/master/docker-compose.yml
-docker compose up
+docker-compose up -d
 ```
 
 Wait a moment to collect data and open panel.
 
 To update docker images to latest version type:
 ```
-docker compose pull
+docker-compose pull
 ```
 
 ## Panel
